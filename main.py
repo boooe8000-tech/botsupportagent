@@ -12,17 +12,20 @@ client = discord.Client(intents=intents)
 
 CHANNEL_ID = int(os.getenv("CHANNEL_ID") or os.getenv("CATEGORY_ID") or "0")
 
-# 🔘 สร้าง Class สำหรับปุ่มกด Confirm / Cancel
+# เซตสำหรับเก็บ User ID ของคนที่เปิด Ticket ค้างไว้อยู่ {user_id}
+active_tickets = set()
+
+# 🔘 Class สำหรับปุ่มกด Confirm / Cancel
 class TicketConfirmView(View):
     def __init__(self, user_message_content, user):
-        super().__init__(timeout=300) # หมดเวลาใน 5 นาที
+        super().__init__(timeout=300)
         self.user_message_content = user_message_content
         self.user = user
 
-    # ปุ่ม ยืนยัน (สีเขียว)
+    # ปุ่ม Create Ticket (สีเขียว)
     @discord.ui.button(label="Create Ticket", style=discord.ButtonStyle.success, emoji="✅")
     async def confirm_callback(self, interaction: discord.Interaction, button: Button):
-        # ปิดปุ่มกดหลังจากคลิกแล้ว
+        # ล็อกปุ่ม
         for child in self.children:
             child.disabled = True
         await interaction.response.edit_message(view=self)
@@ -35,15 +38,17 @@ class TicketConfirmView(View):
                 print(f"❌ Failed to fetch channel {CHANNEL_ID}: {e}")
 
         if target_channel:
-            # ส่งตั๋วเข้าห้องสตาฟ
+            # 🟢 บันทึกว่าผู้ใช้คนนี้เปิด Ticket แล้ว
+            active_tickets.add(self.user.id)
+
             await target_channel.send(
-                f"📩 **[New Ticket from {self.user.display_name}]** (User ID: `{self.user.id}`):\n{self.user_message_content}"
+                f"📩 **[New Ticket Started from {self.user.display_name}]** (User ID: `{self.user.id}`):\n{self.user_message_content}"
             )
-            await interaction.followup.send("✅ **Your ticket has been sent to the support team!**")
+            await interaction.followup.send("✅ **Your ticket has been created! You can continue typing here to send messages to support.**")
         else:
             await interaction.followup.send("❌ Error: Target support channel not found.")
 
-    # ปุ่ม ยกเลิก (สีแดง)
+    # ปุ่ม Cancel (สีแดง)
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger, emoji="❌")
     async def cancel_callback(self, interaction: discord.Interaction, button: Button):
         for child in self.children:
@@ -65,13 +70,21 @@ async def on_message(message):
 
     # 📩 1. เมื่อยูสเซอร์ DM หาบอท
     if isinstance(message.channel, discord.DMChannel):
+        
+        # 🟢 ถ้าผู้ใช้เปิด Ticket ค้างไว้อยู่แล้ว -> ส่งข้อความเข้าห้องสตาฟทันที ไม่ถามซ้ำ!
+        if message.author.id in active_tickets:
+            target_channel = client.get_channel(CHANNEL_ID) or await client.fetch_channel(CHANNEL_ID)
+            if target_channel:
+                await target_channel.send(f"💬 **[{message.author.display_name}]** (ID: `{message.author.id}`): {message.content}")
+                await message.add_reaction("✅")
+            return
+
+        # 🔵 ถ้ายังไม่ได้เปิด Ticket -> ส่ง Embed ถามยืนยันก่อน
         embed = discord.Embed(
             title="Are you sure you want to create a new support ticket?",
             description="Click **Create Ticket** to send your request to the support team or **Cancel** to abort.",
             color=discord.Color.blue()
         )
-        
-        # สร้าง View ที่มีปุ่มกด แล้วส่งไปพร้อม Embed
         view = TicketConfirmView(message.content, message.author)
         await message.channel.send(embed=embed, view=view)
         return
@@ -79,7 +92,7 @@ async def on_message(message):
     # 🛠️ 2. คำสั่งสตาฟใน Channel สตาฟ
     if message.channel.id == CHANNEL_ID:
         
-        # คำสั่ง !claim <User_ID>
+        # 🔴 คำสั่ง !claim <User_ID>
         if message.content.startswith("!claim"):
             parts = message.content.split()
             if len(parts) < 2:
@@ -113,7 +126,31 @@ async def on_message(message):
                 await message.channel.send(f"❌ Error: {e}")
             return
 
-        # คำสั่ง r! <User_ID> <ข้อความ>
+        # 🔒 คำสั่ง !close <User_ID> (ปิดเคสตั๋ว)
+        if message.content.startswith("!close"):
+            parts = message.content.split()
+            if len(parts) < 2:
+                await message.channel.send("⚠️ **Format:** `!close <User_ID>`")
+                return
+
+            try:
+                target_user_id = int(parts[1])
+                if target_user_id in active_tickets:
+                    active_tickets.remove(target_user_id)
+                    
+                    target_user = client.get_user(target_user_id) or await client.fetch_user(target_user_id)
+                    if target_user:
+                        await target_user.send("🔒 **Your support ticket has been closed. Thank you!**")
+                    
+                    await message.add_reaction("✅")
+                    await message.channel.send(f"🔒 Ticket for User ID `{target_user_id}` has been closed.")
+                else:
+                    await message.channel.send("⚠️ This user does not have an active ticket.")
+            except Exception as e:
+                await message.channel.send(f"❌ Error: {e}")
+            return
+
+        # 💬 คำสั่ง r! <User_ID> <ข้อความ>
         if message.content.startswith("r!"):
             try:
                 parts = message.content.split(" ", 2)
