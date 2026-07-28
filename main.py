@@ -10,25 +10,25 @@ intents.members = True
 
 client = discord.Client(intents=intents)
 
-CHANNEL_ID = int(os.getenv("CHANNEL_ID") or os.getenv("CATEGORY_ID") or "0")
+# ดึง Category ID จาก Railway
+CATEGORY_ID = int(os.getenv("CATEGORY_ID") or os.getenv("CHANNEL_ID") or "0")
 
-# เซตเก็บ Active Tickets (ส่งผ่าน memory)
-active_tickets = set()
+# เก็บข้อมูลตั๋วที่เปิดอยู่ {user_id: channel_id}
+active_tickets = {}
 
-# 🔘 Class ปุ่มกด
+# 🔘 Class สำหรับปุ่มกด Confirm / Cancel
 class TicketConfirmView(View):
     def __init__(self, user_message_content, user):
-        super().__init__(timeout=None) # ไม่ให้ปุ่มหมดอายุ
+        super().__init__(timeout=None)
         self.user_message_content = user_message_content
         self.user = user
 
     # ปุ่ม Create Ticket (สีเขียว)
     @discord.ui.button(label="Create Ticket", style=discord.ButtonStyle.success, emoji="✅")
     async def confirm_callback(self, interaction: discord.Interaction, button: Button):
-        # ⚡ 1. บอก Discord ทันทีว่ากดปุ่มแล้ว (ป้องกัน Timeout 3 วินาที)
         await interaction.response.defer(ephemeral=True)
 
-        # ⚡ 2. ปิดปุ่มเพื่อไม่ให้กดซ้ำ
+        # ปิดปุ่มกด
         for child in self.children:
             child.disabled = True
         try:
@@ -36,27 +36,53 @@ class TicketConfirmView(View):
         except Exception as e:
             print(f"Failed to edit view: {e}")
 
-        # ⚡ 3. หา Channel
-        target_channel = client.get_channel(CHANNEL_ID)
-        if not target_channel:
+        # ดึง Category ตาม ID ที่ตั้งไว้
+        category = client.get_channel(CATEGORY_ID)
+        if not category or not isinstance(category, discord.CategoryChannel):
             try:
-                target_channel = await client.fetch_channel(CHANNEL_ID)
+                category = await client.fetch_channel(CATEGORY_ID)
             except Exception as e:
-                print(f"❌ Failed to fetch channel {CHANNEL_ID}: {e}")
+                print(f"❌ Failed to fetch category {CATEGORY_ID}: {e}")
 
-        # ⚡ 4. ส่งข้อมูลเข้าห้องสตาฟ
-        if target_channel:
-            active_tickets.add(self.user.id)
+        if category and isinstance(category, discord.CategoryChannel):
+            guild = category.guild
+
+            # 🛠️ ตั้งค่าสิทธิ์ของห้อง Ticket ใหม่
+            # - ให้สตาฟมองเห็น ( Customer Service Team / Admin )
+            # - ซ่อนห้องจากคนทั่วไป (@everyone)
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(read_messages=False),
+                guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+            }
+
             try:
-                await target_channel.send(
-                    f"📩 **[New Ticket Started from {self.user.display_name}]** (User ID: `{self.user.id}`):\n{self.user_message_content}"
+                # ➕ สร้าง Text Channel ใหม่ใต้มวดหมู่ (Category)
+                channel_name = f"ticket-{self.user.name}".lower().replace(" ", "-")
+                ticket_channel = await guild.create_text_channel(
+                    name=channel_name,
+                    category=category,
+                    overwrites=overwrites
                 )
-                await interaction.followup.send("✅ **Your ticket has been created! You can now continue typing here to speak with support.**")
+
+                # บันทึกสถานะว่าเปิดตั๋วอยู่ในห้องไหน
+                active_tickets[self.user.id] = ticket_channel.id
+
+                # ส่งข้อความแรกเข้าห้องตั๋วที่เพิ่งสร้าง
+                embed = discord.Embed(
+                    title=f"Ticket: {self.user.display_name}",
+                    description=f"**User ID:** `{self.user.id}`\n\n**Inquiry:**\n{self.user_message_content}",
+                    color=discord.Color.blue()
+                )
+                await ticket_channel.send(content=f"📩 **New Ticket Created!**", embed=embed)
+
+                # แจ้งกลับหายูสเซอร์ใน DM
+                await interaction.followup.send("✅ **Your ticket channel has been created! Our support team will assist you shortly.**")
+
             except Exception as e:
-                print(f"❌ Error sending to channel: {e}")
-                await interaction.followup.send("❌ Error sending message to support staff.")
+                print(f"❌ Error creating channel: {e}")
+                await interaction.followup.send(f"❌ Failed to create ticket channel: {e}")
         else:
-            await interaction.followup.send("❌ Error: Target support channel not found. Please contact an admin.")
+            await interaction.followup.send("❌ Error: Invalid Category ID. Please check Railway Variables.")
 
     # ปุ่ม Cancel (สีแดง)
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger, emoji="❌")
@@ -75,7 +101,7 @@ class TicketConfirmView(View):
 @client.event
 async def on_ready():
     print(f'✅ Logged in as {client.user}')
-    print(f'📌 Target Channel ID set to: {CHANNEL_ID}')
+    print(f'📌 Target Category ID set to: {CATEGORY_ID}')
 
 
 @client.event
@@ -83,26 +109,22 @@ async def on_message(message):
     if message.author == client.user:
         return
 
-    # 📩 1. เมื่อยูสเซอร์ DM หาบอท
+    # 📩 1. เมื่อยูสเซอร์ส่ง DM หาบอท
     if isinstance(message.channel, discord.DMChannel):
         
-        # ถ้าเปิด Active Ticket ไว้อยู่แล้ว ให้ส่งข้อความเข้าห้องสตาฟทันที
+        # ถ้าเปิด Ticket ไว้อยู่แล้ว ให้ส่งข้อความเข้าไปในห้อง Ticket ของเขา
         if message.author.id in active_tickets:
-            target_channel = client.get_channel(CHANNEL_ID)
-            if not target_channel:
-                try:
-                    target_channel = await client.fetch_channel(CHANNEL_ID)
-                except Exception as e:
-                    print(f"❌ Error fetching channel: {e}")
-
-            if target_channel:
-                await target_channel.send(f"💬 **[{message.author.display_name}]** (ID: `{message.author.id}`): {message.content}")
+            ticket_channel_id = active_tickets[message.author.id]
+            ticket_channel = client.get_channel(ticket_channel_id) or await client.fetch_channel(ticket_channel_id)
+            
+            if ticket_channel:
+                await ticket_channel.send(f"💬 **[{message.author.display_name}]**: {message.content}")
                 await message.add_reaction("✅")
             else:
-                await message.channel.send("❌ Could not connect to support channel.")
+                await message.channel.send("❌ Active ticket channel not found.")
             return
 
-        # ถ้ายังไม่ได้เปิด Ticket -> ส่ง Embed พร้อมปุ่มกด
+        # ถ้ายังไม่ได้เปิด Ticket -> ส่ง Embed พร้อมปุ่ม Create Ticket
         embed = discord.Embed(
             title="Are you sure you want to create a new support ticket?",
             description="Click **Create Ticket** to send your request to the support team or **Cancel** to abort.",
@@ -112,20 +134,30 @@ async def on_message(message):
         await message.channel.send(embed=embed, view=view)
         return
 
-    # 🛠️ 2. คำสั่งสำหรับสตาฟในห้อง Channel สตาฟ
-    if message.channel.id == CHANNEL_ID:
-        
-        # คำสั่ง !claim <User_ID>
-        if message.content.startswith("!claim"):
-            parts = message.content.split()
-            if len(parts) < 2:
-                await message.channel.send("⚠️ **Format:** `!claim <User_ID>`")
+    # 🛠️ 2. เมื่อสตาฟพิมพ์ตอบกลับจากในห้อง Discord
+    # ถ้าข้อความส่งมาจากห้อง Ticket ที่สร้างขึ้น
+    for uid, ch_id in list(active_tickets.items()):
+        if message.channel.id == ch_id:
+            
+            # คำสั่ง !close เพื่อปิดและลบห้อง
+            if message.content.startswith("!close"):
+                target_user = client.get_user(uid) or await client.fetch_user(uid)
+                if target_user:
+                    try:
+                        await target_user.send("🔒 **Your support ticket has been closed. Thank you!**")
+                    except Exception as e:
+                        print(f"Error sending DM: {e}")
+                
+                del active_tickets[uid]
+                await message.channel.send("🔒 Closing and deleting channel in 5 seconds...")
+                import asyncio
+                await asyncio.sleep(5)
+                await message.channel.delete()
                 return
 
-            try:
-                target_user_id = int(parts[1])
-                target_user = client.get_user(target_user_id) or await client.fetch_user(target_user_id)
-                
+            # คำสั่ง !claim (ส่ง Embed สีแดงหาผู้ใช้)
+            if message.content.startswith("!claim"):
+                target_user = client.get_user(uid) or await client.fetch_user(uid)
                 if target_user:
                     staff_name = message.author.display_name
                     claim_embed = discord.Embed(
@@ -138,59 +170,16 @@ async def on_message(message):
                         color=discord.Color.from_rgb(209, 17, 36)
                     )
                     claim_embed.set_author(name="Support Agent Connected")
-
                     await target_user.send(embed=claim_embed)
                     await message.add_reaction("✅")
-                    await message.channel.send(f"🟢 **{staff_name}** has claimed ticket for `{target_user.name}` (ID: `{target_user_id}`)")
-                else:
-                    await message.channel.send("❌ Could not find user.")
-            except Exception as e:
-                await message.channel.send(f"❌ Error: {e}")
-            return
-
-        # คำสั่ง !close <User_ID>
-        if message.content.startswith("!close"):
-            parts = message.content.split()
-            if len(parts) < 2:
-                await message.channel.send("⚠️ **Format:** `!close <User_ID>`")
+                    await message.channel.send(f"🟢 **{staff_name}** has claimed this ticket.")
                 return
 
-            try:
-                target_user_id = int(parts[1])
-                if target_user_id in active_tickets:
-                    active_tickets.remove(target_user_id)
-                    
-                    target_user = client.get_user(target_user_id) or await client.fetch_user(target_user_id)
-                    if target_user:
-                        await target_user.send("🔒 **Your support ticket has been closed. Thank you!**")
-                    
-                    await message.add_reaction("✅")
-                    await message.channel.send(f"🔒 Ticket for User ID `{target_user_id}` has been closed.")
-                else:
-                    await message.channel.send("⚠️ This user does not have an active ticket.")
-            except Exception as e:
-                await message.channel.send(f"❌ Error: {e}")
-            return
-
-        # คำสั่ง r! <User_ID> <ข้อความ>
-        if message.content.startswith("r!"):
-            try:
-                parts = message.content.split(" ", 2)
-                if len(parts) < 3:
-                    await message.channel.send("⚠️ **Format:** `r! <User_ID> <Message>`")
-                    return
-                    
-                target_user_id = int(parts[1])
-                reply_text = parts[2]
-                
-                target_user = client.get_user(target_user_id) or await client.fetch_user(target_user_id)
-
-                if target_user:
-                    await target_user.send(f"💬 **Support Response:** {reply_text}")
-                    await message.add_reaction("✅")
-                else:
-                    await message.channel.send("❌ Could not find user.")
-            except Exception as e:
-                await message.channel.send(f"❌ Error: {e}")
+            # พิมพ์ข้อความธรรมดาในห้อง Ticket -> บอทจะส่ง DM ไปหายูสเซอร์คนนั้นให้อัตโนมัติ!
+            target_user = client.get_user(uid) or await client.fetch_user(uid)
+            if target_user:
+                await target_user.send(f"💬 **Support Response:** {message.content}")
+                await message.add_reaction("✅")
+            break
 
 client.run(os.getenv("DISCORD_TOKEN"))
