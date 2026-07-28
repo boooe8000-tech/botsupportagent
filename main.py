@@ -12,24 +12,31 @@ client = discord.Client(intents=intents)
 
 CHANNEL_ID = int(os.getenv("CHANNEL_ID") or os.getenv("CATEGORY_ID") or "0")
 
-# เซตสำหรับเก็บ User ID ของคนที่เปิด Ticket ค้างไว้อยู่ {user_id}
+# เซตเก็บ Active Tickets (ส่งผ่าน memory)
 active_tickets = set()
 
-# 🔘 Class สำหรับปุ่มกด Confirm / Cancel
+# 🔘 Class ปุ่มกด
 class TicketConfirmView(View):
     def __init__(self, user_message_content, user):
-        super().__init__(timeout=300)
+        super().__init__(timeout=None) # ไม่ให้ปุ่มหมดอายุ
         self.user_message_content = user_message_content
         self.user = user
 
     # ปุ่ม Create Ticket (สีเขียว)
     @discord.ui.button(label="Create Ticket", style=discord.ButtonStyle.success, emoji="✅")
     async def confirm_callback(self, interaction: discord.Interaction, button: Button):
-        # ล็อกปุ่ม
+        # ⚡ 1. บอก Discord ทันทีว่ากดปุ่มแล้ว (ป้องกัน Timeout 3 วินาที)
+        await interaction.response.defer(ephemeral=True)
+
+        # ⚡ 2. ปิดปุ่มเพื่อไม่ให้กดซ้ำ
         for child in self.children:
             child.disabled = True
-        await interaction.response.edit_message(view=self)
+        try:
+            await interaction.message.edit(view=self)
+        except Exception as e:
+            print(f"Failed to edit view: {e}")
 
+        # ⚡ 3. หา Channel
         target_channel = client.get_channel(CHANNEL_ID)
         if not target_channel:
             try:
@@ -37,23 +44,31 @@ class TicketConfirmView(View):
             except Exception as e:
                 print(f"❌ Failed to fetch channel {CHANNEL_ID}: {e}")
 
+        # ⚡ 4. ส่งข้อมูลเข้าห้องสตาฟ
         if target_channel:
-            # 🟢 บันทึกว่าผู้ใช้คนนี้เปิด Ticket แล้ว
             active_tickets.add(self.user.id)
-
-            await target_channel.send(
-                f"📩 **[New Ticket Started from {self.user.display_name}]** (User ID: `{self.user.id}`):\n{self.user_message_content}"
-            )
-            await interaction.followup.send("✅ **Your ticket has been created! You can continue typing here to send messages to support.**")
+            try:
+                await target_channel.send(
+                    f"📩 **[New Ticket Started from {self.user.display_name}]** (User ID: `{self.user.id}`):\n{self.user_message_content}"
+                )
+                await interaction.followup.send("✅ **Your ticket has been created! You can now continue typing here to speak with support.**")
+            except Exception as e:
+                print(f"❌ Error sending to channel: {e}")
+                await interaction.followup.send("❌ Error sending message to support staff.")
         else:
-            await interaction.followup.send("❌ Error: Target support channel not found.")
+            await interaction.followup.send("❌ Error: Target support channel not found. Please contact an admin.")
 
     # ปุ่ม Cancel (สีแดง)
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger, emoji="❌")
     async def cancel_callback(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.defer(ephemeral=True)
         for child in self.children:
             child.disabled = True
-        await interaction.response.edit_message(view=self)
+        try:
+            await interaction.message.edit(view=self)
+        except Exception as e:
+            print(f"Failed to edit view: {e}")
+            
         await interaction.followup.send("❌ **Ticket creation cancelled.**")
 
 
@@ -71,15 +86,23 @@ async def on_message(message):
     # 📩 1. เมื่อยูสเซอร์ DM หาบอท
     if isinstance(message.channel, discord.DMChannel):
         
-        # 🟢 ถ้าผู้ใช้เปิด Ticket ค้างไว้อยู่แล้ว -> ส่งข้อความเข้าห้องสตาฟทันที ไม่ถามซ้ำ!
+        # ถ้าเปิด Active Ticket ไว้อยู่แล้ว ให้ส่งข้อความเข้าห้องสตาฟทันที
         if message.author.id in active_tickets:
-            target_channel = client.get_channel(CHANNEL_ID) or await client.fetch_channel(CHANNEL_ID)
+            target_channel = client.get_channel(CHANNEL_ID)
+            if not target_channel:
+                try:
+                    target_channel = await client.fetch_channel(CHANNEL_ID)
+                except Exception as e:
+                    print(f"❌ Error fetching channel: {e}")
+
             if target_channel:
                 await target_channel.send(f"💬 **[{message.author.display_name}]** (ID: `{message.author.id}`): {message.content}")
                 await message.add_reaction("✅")
+            else:
+                await message.channel.send("❌ Could not connect to support channel.")
             return
 
-        # 🔵 ถ้ายังไม่ได้เปิด Ticket -> ส่ง Embed ถามยืนยันก่อน
+        # ถ้ายังไม่ได้เปิด Ticket -> ส่ง Embed พร้อมปุ่มกด
         embed = discord.Embed(
             title="Are you sure you want to create a new support ticket?",
             description="Click **Create Ticket** to send your request to the support team or **Cancel** to abort.",
@@ -89,10 +112,10 @@ async def on_message(message):
         await message.channel.send(embed=embed, view=view)
         return
 
-    # 🛠️ 2. คำสั่งสตาฟใน Channel สตาฟ
+    # 🛠️ 2. คำสั่งสำหรับสตาฟในห้อง Channel สตาฟ
     if message.channel.id == CHANNEL_ID:
         
-        # 🔴 คำสั่ง !claim <User_ID>
+        # คำสั่ง !claim <User_ID>
         if message.content.startswith("!claim"):
             parts = message.content.split()
             if len(parts) < 2:
@@ -105,7 +128,6 @@ async def on_message(message):
                 
                 if target_user:
                     staff_name = message.author.display_name
-                    
                     claim_embed = discord.Embed(
                         title="Support Agent Connected",
                         description=(
@@ -126,7 +148,7 @@ async def on_message(message):
                 await message.channel.send(f"❌ Error: {e}")
             return
 
-        # 🔒 คำสั่ง !close <User_ID> (ปิดเคสตั๋ว)
+        # คำสั่ง !close <User_ID>
         if message.content.startswith("!close"):
             parts = message.content.split()
             if len(parts) < 2:
@@ -150,7 +172,7 @@ async def on_message(message):
                 await message.channel.send(f"❌ Error: {e}")
             return
 
-        # 💬 คำสั่ง r! <User_ID> <ข้อความ>
+        # คำสั่ง r! <User_ID> <ข้อความ>
         if message.content.startswith("r!"):
             try:
                 parts = message.content.split(" ", 2)
