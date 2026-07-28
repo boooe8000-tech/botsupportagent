@@ -11,12 +11,13 @@ client = discord.Client(intents=intents)
 
 CHANNEL_ID = int(os.getenv("CHANNEL_ID") or os.getenv("CATEGORY_ID") or "0")
 
-# พจนานุกรมสำหรับเก็บข้อความชั่วคราวรอการยืนยัน {message_id: content}
+# พจนานุกรมเก็บข้อมูล {bot_embed_message_id: user_message_content}
 pending_tickets = {}
 
 @client.event
 async def on_ready():
-    print(f'Logged in as {client.user}')
+    print(f'✅ Logged in as {client.user}')
+    print(f'📌 Target Channel ID set to: {CHANNEL_ID}')
 
 @client.event
 async def on_message(message):
@@ -25,25 +26,30 @@ async def on_message(message):
 
     # 📩 1. เมื่อมีคน DM หาบอท
     if isinstance(message.channel, discord.DMChannel):
-        try:
-            await message.add_reaction("✅")
-        except Exception as e:
-            print(f"Error adding reaction: {e}")
-
-        pending_tickets[message.id] = message.content
-
         embed = discord.Embed(
             title="Are you sure you want to create a new support ticket?",
-            description="React to ✅ to send a ticket to the support team.",
+            description="React to ✅ to send a ticket to the support team or ❌ to cancel.",
             color=discord.Color.blue()
         )
-        await message.channel.send(embed=embed)
+        
+        # ส่ง Embed ไปหาผู้ใช้
+        bot_msg = await message.channel.send(embed=embed)
+        
+        # ใส่ Reaction ✅ และ ❌ ที่ข้อความ Embed ของบอท
+        try:
+            await bot_msg.add_reaction("✅")
+            await bot_msg.add_reaction("❌")
+        except Exception as e:
+            print(f"❌ Failed to add reactions: {e}")
+
+        # ผูก ID ข้อความของบอทเข้ากับเนื้อหาที่ผู้ใช้พิมพ์ส่งมา
+        pending_tickets[bot_msg.id] = message.content
         return
 
-    # 🛠️ โซนคำสั่งสำหรับสตาฟใน Channel
+    # 🛠️ โซนคำสั่งสตาฟใน Channel
     if message.channel.id == CHANNEL_ID:
         
-        # 📌 2. คำสั่ง !claim <User_ID> (ส่ง Embed รับเรื่องให้ยูสเซอร์)
+        # คำสั่ง !claim <User_ID>
         if message.content.startswith("!claim"):
             parts = message.content.split()
             if len(parts) < 2:
@@ -55,10 +61,8 @@ async def on_message(message):
                 target_user = await client.fetch_user(target_user_id)
                 
                 if target_user:
-                    # ดึงชื่อสตาฟที่พิมพ์คำสั่ง
                     staff_name = message.author.display_name
                     
-                    # สร้าง Embed แบบในภาพ (สีแดง #D11124)
                     claim_embed = discord.Embed(
                         title="Support Agent Connected",
                         description=(
@@ -68,24 +72,18 @@ async def on_message(message):
                         ),
                         color=discord.Color.from_rgb(209, 17, 36)
                     )
-                    
-                    # ใส่โลโก้ข้างบนภาพ Embed (ถ้ามีลิงก์รูปให้ใส่ใน url)
-                    claim_embed.set_author(
-                        name="Support Agent Connected"
-                    )
+                    claim_embed.set_author(name="Support Agent Connected")
 
                     await target_user.send(embed=claim_embed)
                     await message.add_reaction("✅")
                     await message.channel.send(f"🟢 **{staff_name}** has claimed ticket for `{target_user.name}` (ID: `{target_user_id}`)")
                 else:
                     await message.channel.send("❌ Could not find user.")
-            except ValueError:
-                await message.channel.send("❌ Invalid User ID.")
             except Exception as e:
-                await message.channel.send(f"❌ Error sending claim message: {e}")
+                await message.channel.send(f"❌ Error: {e}")
             return
 
-        # 📤 3. คำสั่ง r! <User_ID> <ข้อความ> (ส่งข้อความตอบกลับธรรมดา)
+        # คำสั่ง r! <User_ID> <Message>
         if message.content.startswith("r!"):
             try:
                 parts = message.content.split(" ", 2)
@@ -107,24 +105,36 @@ async def on_message(message):
 
 @client.event
 async def on_raw_reaction_add(payload):
+    # ข้าม Reaction ที่บอทเป็นคนกดเอง
     if payload.user_id == client.user.id:
         return
 
-    if str(payload.emoji) == "✅" and payload.message_id in pending_tickets:
+    # เช็กว่าเป็นข้อความ Embed ถามยืนยันที่รอปฏิกิริยาอยู่หรือไม่
+    if payload.message_id in pending_tickets:
         user_message_content = pending_tickets.pop(payload.message_id)
-        
-        target_channel = client.get_channel(CHANNEL_ID)
-        if target_channel:
-            user = await client.fetch_user(payload.user_id)
-            
-            await target_channel.send(
-                f"📩 **[New Ticket from {user.display_name}]** (User ID: `{user.id}`):\n{user_message_content}"
-            )
-            
+        user = await client.fetch_user(payload.user_id)
+
+        # 🟢 กรณีที่ผู้ใช้กด ✅
+        if str(payload.emoji) == "✅":
+            target_channel = client.get_channel(CHANNEL_ID)
+            if target_channel:
+                await target_channel.send(
+                    f"📩 **[New Ticket from {user.display_name}]** (User ID: `{user.id}`):\n{user_message_content}"
+                )
+                try:
+                    dm_channel = await user.create_dm()
+                    await dm_channel.send("✅ **Your ticket has been sent to the support team!**")
+                except Exception as e:
+                    print(f"Error sending confirmation DM: {e}")
+            else:
+                print(f"❌ Channel ID {CHANNEL_ID} not found.")
+
+        # 🔴 กรณีที่ผู้ใช้กด ❌
+        elif str(payload.emoji) == "❌":
             try:
                 dm_channel = await user.create_dm()
-                await dm_channel.send("✅ **Your ticket has been sent to the support team!**")
+                await dm_channel.send("❌ **Ticket creation cancelled.**")
             except Exception as e:
-                print(f"Error sending confirmation DM: {e}")
+                print(f"Error sending cancel DM: {e}")
 
 client.run(os.getenv("DISCORD_TOKEN"))
