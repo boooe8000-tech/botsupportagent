@@ -20,13 +20,37 @@ EVA_GREEN = discord.Color.from_rgb(0, 96, 57)
 # เก็บข้อมูลตั๋วที่เปิดอยู่ {user_id: channel_id}
 active_tickets = {}
 
-# ฟังก์ชันสร้าง Embed สไตล์ EVA Air
-def create_eva_embed(author: discord.User, title: str, description: str):
+# 🖼️ ฟังก์ชันสร้าง Embed สไตล์ EVA Air (รองรับ รูปภาพ และ ไฟล์แนบ)
+def create_eva_embed(author: discord.User, title: str, message: discord.Message):
+    # เนื้อหาข้อความ (ถ้าไม่มีพิมพ์ตัวหนังสือมาเลย ให้ใช้ช่องว่าง)
+    description = message.content if message.content else ""
+    
+    # ตรวจสอบไฟล์แนบ (Attachments)
+    attachments_text = ""
+    first_image_url = None
+
+    if message.attachments:
+        for attachment in message.attachments:
+            # ถ้าเป็นไฟล์รูปภาพ เก็บ URL ไว้โชว์ใน Embed
+            if attachment.content_type and attachment.content_type.startswith('image/'):
+                if not first_image_url:
+                    first_image_url = attachment.url
+            # ไฟล์ทั่วไปหรือรูปภาพเพิ่มเติม แปะลิงก์ดาวน์โหลดไว้ใน Embed
+            attachments_text += f"📎 [{attachment.filename}]({attachment.url})\n"
+
+    if attachments_text:
+        description += f"\n\n**Attachments:**\n{attachments_text}"
+
     embed = discord.Embed(
         title=title,
         description=description,
         color=EVA_GREEN
     )
+    
+    # ถ้ามีรูปภาพ ให้ตั้งเป็น Image ใหญ่ใน Embed
+    if first_image_url:
+        embed.set_image(url=first_image_url)
+
     # แสดงชื่อผู้ส่งและรูปโปรไฟล์ที่ส่วน Author
     avatar_url = author.display_avatar.url if author.display_avatar else author.default_avatar.url
     embed.set_author(name=author.display_name, icon_url=avatar_url)
@@ -39,9 +63,9 @@ def create_eva_embed(author: discord.User, title: str, description: str):
 
 # 🔘 Class สำหรับปุ่มกด Confirm / Cancel
 class TicketConfirmView(View):
-    def __init__(self, user_message_content, user):
+    def __init__(self, initial_message: discord.Message, user: discord.User):
         super().__init__(timeout=None)
-        self.user_message_content = user_message_content
+        self.initial_message = initial_message
         self.user = user
 
     # ปุ่ม Create Ticket (สีเขียว)
@@ -82,11 +106,11 @@ class TicketConfirmView(View):
 
                 active_tickets[self.user.id] = ticket_channel.id
 
-                # สร้าง Embed เขียวเข้ม เมื่อสร้าง Ticket ใหม่
+                # สร้าง Embed รองรับรูปภาพ/ไฟล์แนบ จากข้อความแรก
                 embed = create_eva_embed(
                     author=self.user,
                     title="Message Received",
-                    description=self.user_message_content
+                    message=self.initial_message
                 )
                 await ticket_channel.send(embed=embed)
 
@@ -126,7 +150,7 @@ async def on_message(message):
     # 📩 1. เมื่อผู้ใช้พิมพ์ DM หาบอท
     if isinstance(message.channel, discord.DMChannel):
         
-        # ถ้าอยู่ในสถานะ Ticket -> ส่ง Embed สีเขียวเข้าห้อง Ticket ของสตาฟ
+        # ถ้าอยู่ในสถานะ Ticket -> ส่ง Embed สีเขียว (รวมรูปและไฟล์) เข้าห้อง Ticket ของสตาฟ
         if message.author.id in active_tickets:
             ticket_channel_id = active_tickets[message.author.id]
             ticket_channel = client.get_channel(ticket_channel_id) or await client.fetch_channel(ticket_channel_id)
@@ -135,7 +159,7 @@ async def on_message(message):
                 embed = create_eva_embed(
                     author=message.author,
                     title="Message Received",
-                    description=message.content
+                    message=message
                 )
                 await ticket_channel.send(embed=embed)
                 await message.add_reaction("✅")
@@ -149,7 +173,7 @@ async def on_message(message):
             description="Click **Create Ticket** to send your request to the support team or **Cancel** to abort.",
             color=EVA_GREEN
         )
-        view = TicketConfirmView(message.content, message.author)
+        view = TicketConfirmView(message, message.author)
         await message.channel.send(embed=embed, view=view)
         return
 
@@ -162,7 +186,7 @@ async def on_message(message):
                 target_user = client.get_user(uid) or await client.fetch_user(uid)
                 if target_user:
                     try:
-                        await target_user.send("🔒 **Your support ticket has been closed. Thank you!**")
+                        await target_user.send("**Support Agent has been disconnect, ticket channel will be deleted shortly.**")
                     except Exception as e:
                         print(f"Error sending DM: {e}")
                 
@@ -185,7 +209,7 @@ async def on_message(message):
                             f"Please provide your inquiry to ensure a fast and efficient assistance process.\n\n"
                             f"Thank you!"
                         ),
-                        color=discord.Color.from_rgb(209, 17, 36) # คงสีแดงสำหรับ Claim Alert
+                        color=discord.Color.from_rgb(209, 17, 36)
                     )
                     claim_embed.set_author(name="Support Agent Connected")
                     await target_user.send(embed=claim_embed)
@@ -193,13 +217,13 @@ async def on_message(message):
                     await message.channel.send(f"🟢 **{staff_name}** has claimed this ticket.")
                 return
 
-            # สตาฟพิมพ์ตอบธรรมดา -> ส่ง Embed เขียวหาผู้ใช้ใน DM
+            # สตาฟพิมพ์ตอบธรรมดา (ส่งทั้งข้อความ รูป และไฟล์ ไปที่ DM ยูสเซอร์)
             target_user = client.get_user(uid) or await client.fetch_user(uid)
             if target_user:
                 embed = create_eva_embed(
                     author=message.author,
                     title="Support Response",
-                    description=message.content
+                    message=message
                 )
                 await target_user.send(embed=embed)
                 await message.add_reaction("✅")
