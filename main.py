@@ -1,6 +1,7 @@
 import discord
 from discord.ui import Button, View
 import os
+from datetime import datetime
 
 # 1. ตั้งค่า Intents
 intents = discord.Intents.default()
@@ -13,8 +14,28 @@ client = discord.Client(intents=intents)
 # ดึง Category ID จาก Railway
 CATEGORY_ID = int(os.getenv("CATEGORY_ID") or os.getenv("CHANNEL_ID") or "0")
 
+# สีเขียวเข้ม EVA Air (HEX: #006039)
+EVA_GREEN = discord.Color.from_rgb(0, 96, 57)
+
 # เก็บข้อมูลตั๋วที่เปิดอยู่ {user_id: channel_id}
 active_tickets = {}
+
+# ฟังก์ชันสร้าง Embed สไตล์ EVA Air
+def create_eva_embed(author: discord.User, title: str, description: str):
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        color=EVA_GREEN
+    )
+    # แสดงชื่อผู้ส่งและรูปโปรไฟล์ที่ส่วน Author
+    avatar_url = author.display_avatar.url if author.display_avatar else author.default_avatar.url
+    embed.set_author(name=author.display_name, icon_url=avatar_url)
+    
+    # ส่วน Footer ด้านล่าง
+    now_str = datetime.now().strftime("%d/%m/%Y %H:%M")
+    embed.set_footer(text=f"EVA Airways Corporation | {author.id} • {now_str}")
+    return embed
+
 
 # 🔘 Class สำหรับปุ่มกด Confirm / Cancel
 class TicketConfirmView(View):
@@ -28,7 +49,6 @@ class TicketConfirmView(View):
     async def confirm_callback(self, interaction: discord.Interaction, button: Button):
         await interaction.response.defer(ephemeral=True)
 
-        # ปิดปุ่มกด
         for child in self.children:
             child.disabled = True
         try:
@@ -36,7 +56,6 @@ class TicketConfirmView(View):
         except Exception as e:
             print(f"Failed to edit view: {e}")
 
-        # ดึง Category ตาม ID ที่ตั้งไว้
         category = client.get_channel(CATEGORY_ID)
         if not category or not isinstance(category, discord.CategoryChannel):
             try:
@@ -47,16 +66,13 @@ class TicketConfirmView(View):
         if category and isinstance(category, discord.CategoryChannel):
             guild = category.guild
 
-            # 🛠️ ตั้งค่าสิทธิ์ของห้อง Ticket ใหม่
-            # - ให้สตาฟมองเห็น ( Customer Service Team / Admin )
-            # - ซ่อนห้องจากคนทั่วไป (@everyone)
             overwrites = {
                 guild.default_role: discord.PermissionOverwrite(read_messages=False),
                 guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
             }
 
             try:
-                # ➕ สร้าง Text Channel ใหม่ใต้มวดหมู่ (Category)
+                # สร้างห้อง Ticket
                 channel_name = f"ticket-{self.user.name}".lower().replace(" ", "-")
                 ticket_channel = await guild.create_text_channel(
                     name=channel_name,
@@ -64,18 +80,16 @@ class TicketConfirmView(View):
                     overwrites=overwrites
                 )
 
-                # บันทึกสถานะว่าเปิดตั๋วอยู่ในห้องไหน
                 active_tickets[self.user.id] = ticket_channel.id
 
-                # ส่งข้อความแรกเข้าห้องตั๋วที่เพิ่งสร้าง
-                embed = discord.Embed(
-                    title=f"Ticket: {self.user.display_name}",
-                    description=f"**User ID:** `{self.user.id}`\n\n**Inquiry:**\n{self.user_message_content}",
-                    color=discord.Color.blue()
+                # สร้าง Embed เขียวเข้ม เมื่อสร้าง Ticket ใหม่
+                embed = create_eva_embed(
+                    author=self.user,
+                    title="Message Received",
+                    description=self.user_message_content
                 )
-                await ticket_channel.send(content=f"📩 **New Ticket Created!**", embed=embed)
+                await ticket_channel.send(embed=embed)
 
-                # แจ้งกลับหายูสเซอร์ใน DM
                 await interaction.followup.send("✅ **Your ticket channel has been created! Our support team will assist you shortly.**")
 
             except Exception as e:
@@ -109,37 +123,41 @@ async def on_message(message):
     if message.author == client.user:
         return
 
-    # 📩 1. เมื่อยูสเซอร์ส่ง DM หาบอท
+    # 📩 1. เมื่อผู้ใช้พิมพ์ DM หาบอท
     if isinstance(message.channel, discord.DMChannel):
         
-        # ถ้าเปิด Ticket ไว้อยู่แล้ว ให้ส่งข้อความเข้าไปในห้อง Ticket ของเขา
+        # ถ้าอยู่ในสถานะ Ticket -> ส่ง Embed สีเขียวเข้าห้อง Ticket ของสตาฟ
         if message.author.id in active_tickets:
             ticket_channel_id = active_tickets[message.author.id]
             ticket_channel = client.get_channel(ticket_channel_id) or await client.fetch_channel(ticket_channel_id)
             
             if ticket_channel:
-                await ticket_channel.send(f"💬 **[{message.author.display_name}]**: {message.content}")
+                embed = create_eva_embed(
+                    author=message.author,
+                    title="Message Received",
+                    description=message.content
+                )
+                await ticket_channel.send(embed=embed)
                 await message.add_reaction("✅")
             else:
                 await message.channel.send("❌ Active ticket channel not found.")
             return
 
-        # ถ้ายังไม่ได้เปิด Ticket -> ส่ง Embed พร้อมปุ่ม Create Ticket
+        # ถ้ายังไม่ได้เปิด Ticket -> ถามยืนยัน
         embed = discord.Embed(
             title="Are you sure you want to create a new support ticket?",
             description="Click **Create Ticket** to send your request to the support team or **Cancel** to abort.",
-            color=discord.Color.blue()
+            color=EVA_GREEN
         )
         view = TicketConfirmView(message.content, message.author)
         await message.channel.send(embed=embed, view=view)
         return
 
     # 🛠️ 2. เมื่อสตาฟพิมพ์ตอบกลับจากในห้อง Discord
-    # ถ้าข้อความส่งมาจากห้อง Ticket ที่สร้างขึ้น
     for uid, ch_id in list(active_tickets.items()):
         if message.channel.id == ch_id:
             
-            # คำสั่ง !close เพื่อปิดและลบห้อง
+            # คำสั่ง !close เพื่อปิดห้อง
             if message.content.startswith("!close"):
                 target_user = client.get_user(uid) or await client.fetch_user(uid)
                 if target_user:
@@ -155,7 +173,7 @@ async def on_message(message):
                 await message.channel.delete()
                 return
 
-            # คำสั่ง !claim (ส่ง Embed สีแดงหาผู้ใช้)
+            # คำสั่ง !claim (สตาฟรับเรื่อง)
             if message.content.startswith("!claim"):
                 target_user = client.get_user(uid) or await client.fetch_user(uid)
                 if target_user:
@@ -167,7 +185,7 @@ async def on_message(message):
                             f"Please provide your inquiry to ensure a fast and efficient assistance process.\n\n"
                             f"Thank you!"
                         ),
-                        color=discord.Color.from_rgb(209, 17, 36)
+                        color=discord.Color.from_rgb(209, 17, 36) # คงสีแดงสำหรับ Claim Alert
                     )
                     claim_embed.set_author(name="Support Agent Connected")
                     await target_user.send(embed=claim_embed)
@@ -175,10 +193,15 @@ async def on_message(message):
                     await message.channel.send(f"🟢 **{staff_name}** has claimed this ticket.")
                 return
 
-            # พิมพ์ข้อความธรรมดาในห้อง Ticket -> บอทจะส่ง DM ไปหายูสเซอร์คนนั้นให้อัตโนมัติ!
+            # สตาฟพิมพ์ตอบธรรมดา -> ส่ง Embed เขียวหาผู้ใช้ใน DM
             target_user = client.get_user(uid) or await client.fetch_user(uid)
             if target_user:
-                await target_user.send(f"💬 **Support Response:** {message.content}")
+                embed = create_eva_embed(
+                    author=message.author,
+                    title="Support Response",
+                    description=message.content
+                )
+                await target_user.send(embed=embed)
                 await message.add_reaction("✅")
             break
 
